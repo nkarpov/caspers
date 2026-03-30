@@ -48,13 +48,19 @@ The catalog IS the business. All data lives in a `data` schema:
 
 ### Catalog Setup
 
-Before generating `databricks.yml`:
+Before generating code:
 1. List existing catalogs: `databricks catalogs list --profile {profile}`
 2. Suggest a catalog name based on the business (e.g., `cascade_creek_brewing`)
-3. If it doesn't exist, offer to create it: `databricks catalogs create --name {name} --profile {profile}`
+3. Create catalog and schema via SQL statements API (not CLI subcommands):
+   ```bash
+   databricks api post /api/2.0/sql/statements --profile {profile} --json '{
+     "warehouse_id": "{warehouse_id}",
+     "statement": "CREATE CATALOG IF NOT EXISTS {name}"
+   }'
+   ```
 4. Confirm with the user
 
-Never default to `main`. Always use the business-specific catalog.
+Never default to `main`. Always use the business-specific catalog. Volumes are declared in `databricks.yml`, not created via SQL.
 
 ## What You Generate
 

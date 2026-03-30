@@ -68,13 +68,13 @@ DROP CATALOG {name} CASCADE via SQL    → removes catalog, schema, tables, data
 ```
 ├── AGENTS.md                  ← this file (static instructions — never modified by skill)
 ├── BLUEPRINT.md               ← living business blueprint (skill reads/writes this)
-├── databricks.yml             ← infrastructure declaration (THE source of truth)
-├── .agents/                   ← agent-agnostic skill definitions
-│   ├── build-business/        ← top-level coherence engine
-│   │   └── skill.md
-│   └── generate-data/         ← data generation (standalone or sub-skill)
+├── databricks.yml             ← infrastructure declaration (volumes + jobs only)
+├── skills/
+│   └── build-business/        ← top-level coherence engine
 │       ├── skill.md
-│       └── assets/            ← data generation recipes + reference code
+│       └── generate-data/     ← data generation sub-skill
+│           ├── skill.md
+│           └── assets/        ← recipes, reference code, worked examples
 ├── data/
 │   ├── seed_generator.py      ← generates managed Delta tables with PK/FK constraints
 │   ├── canonical_generator.py ← walks state machine to produce event dataset

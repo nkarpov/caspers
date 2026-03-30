@@ -49,17 +49,21 @@ STOP HERE. Do not define pipeline, agent, or app yet. Get data flowing first.
 Before generating any code, set up the catalog:
 
 1. **Assume the user has `databricks` CLI configured.** Run `databricks auth profiles` or check for a profile flag to determine the connection.
-2. **List existing catalogs**: `databricks catalogs list --profile {profile}`
-3. **Suggest a catalog name** based on the business name (e.g., "cascade_creek_brewing"). It might already exist.
-4. **If it doesn't exist, offer to create it.** Use SQL via the statements API (the CLI `catalogs create` command often fails with metastore storage errors):
+2. **Find the warehouse ID** with `databricks warehouses list --profile {profile}` and record it in the Blueprint.
+3. **List existing catalogs**: `databricks catalogs list --profile {profile}`
+4. **Suggest a catalog name** based on the business name (e.g., "cascade_creek_brewing"). It might already exist.
+5. **Create catalog and schema via SQL** (always use the statements API — CLI subcommands like `catalogs create` are unreliable):
    ```bash
    databricks api post /api/2.0/sql/statements --profile {profile} --json '{
      "warehouse_id": "{warehouse_id}",
-     "statement": "CREATE CATALOG {name}"
+     "statement": "CREATE CATALOG IF NOT EXISTS {name}"
+   }'
+   databricks api post /api/2.0/sql/statements --profile {profile} --json '{
+     "warehouse_id": "{warehouse_id}",
+     "statement": "CREATE SCHEMA IF NOT EXISTS {catalog}.data"
    }'
    ```
-   Then create the `data` schema the same way: `CREATE SCHEMA {catalog}.data`
-5. **Find the warehouse ID** with `databricks warehouses list --profile {profile}` and record it in the Blueprint.
+   **Do NOT create volumes via SQL.** Volumes are declared in `databricks.yml` and created by `bundle deploy`.
 6. **Present the timeline defaults and ask the user to confirm or adjust:**
 
 > I'll generate **40 days** of historical data, with the replay starting at **day 30**. This gives you ~1 month of historical data available immediately on first run, with 10 days of runway before the dataset loops. New events stream at **60x speed** (1 real minute = 1 sim hour).
@@ -70,11 +74,11 @@ Before generating any code, set up the catalog:
 
 All data goes in a schema called `data` within the chosen catalog:
 ```
-{catalog}.data.seed_beers
-{catalog}.data.seed_ingredients
-/Volumes/{catalog}/data/events/
-/Volumes/{catalog}/data/canonical/
-/Volumes/{catalog}/data/misc/
+{catalog}.data.seed_beers          ← managed Delta table (created by seed generator)
+{catalog}.data.seed_ingredients    ← managed Delta table (created by seed generator)
+/Volumes/{catalog}/data/events/    ← volume (declared in databricks.yml)
+/Volumes/{catalog}/data/canonical/ ← volume (declared in databricks.yml)
+/Volumes/{catalog}/data/misc/      ← volume (declared in databricks.yml)
 ```
 
 Record the catalog name, profile, and timeline settings in the Blueprint.
@@ -241,14 +245,30 @@ Never force a recipe. If the user wants something custom, help them build it and
 
 Everything is **DABs-native**. No stage notebooks for infrastructure orchestration. No imperative SDK calls to create resources. No state manager for cleanup.
 
-- `databricks.yml` declares all infrastructure (pipelines, jobs, endpoints, apps, volumes)
+### Resource Ownership
+
+| Resource | Created by | Declared in | Cleaned up by |
+|---|---|---|---|
+| Catalog | SQL (Phase 2.5) | — | `DROP CATALOG CASCADE` via SQL |
+| Schema (`data`) | SQL (Phase 2.5) | — | `DROP CATALOG CASCADE` via SQL |
+| Volumes | `bundle deploy` | `databricks.yml` | `bundle destroy` |
+| Jobs | `bundle deploy` | `databricks.yml` | `bundle destroy` |
+| Tables | Seed generator code | — | `DROP CATALOG CASCADE` via SQL |
+
+- `databricks.yml` declares volumes and jobs only — never catalogs or schemas
 - Code files define behavior (transforms, agent logic, app code, data generation)
-- `databricks bundle deploy` creates volumes and jobs. `databricks bundle destroy` tears those down.
 - **Cleanup is two steps:**
   1. `databricks bundle destroy` — removes jobs, volumes, and workspace files
   2. `DROP CATALOG {catalog} CASCADE` via SQL — removes the catalog, schema, tables, and all data
 
   Always remind the user of both steps when they ask to clean up.
+
+### CLI Usage
+
+Use `databricks` CLI for:
+- **Auth/discovery**: `databricks auth profiles`, `databricks warehouses list`, `databricks catalogs list`
+- **Bundle operations**: `databricks bundle deploy`, `databricks bundle destroy`, `databricks bundle run`
+- **SQL operations**: Always via `databricks api post /api/2.0/sql/statements` (not CLI subcommands like `catalogs create` which are unreliable)
 
 Generated files:
 | File | Purpose |
