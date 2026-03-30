@@ -54,12 +54,14 @@ The skill enforces these invariants:
 
 Everything is DABs-native. No stage notebooks, no imperative infrastructure orchestration, no state tracking for cleanup.
 
-```
-databricks bundle deploy   → creates everything
-databricks bundle destroy  → tears it down
-```
+- Catalog and schema are created via SQL during setup (not in `databricks.yml`)
+- `databricks.yml` declares volumes and jobs only
+- Cleanup is two steps:
 
-`databricks.yml` declares all infrastructure (pipelines, jobs, endpoints, apps, schemas, volumes). Code files define what each component does. That's it.
+```
+databricks bundle destroy              → removes jobs, volumes, workspace files
+DROP CATALOG {name} CASCADE via SQL    → removes catalog, schema, tables, data
+```
 
 ## Project Structure
 
