@@ -2,6 +2,8 @@
 
 Caspers is a skill that builds fully deployable Databricks business demos from natural language. Describe a business — airline, bank, hospital, ghost kitchen — and Caspers generates coherent streaming data, Spark Declarative Pipelines, AI agents, and apps.
 
+**Current state:** The data generation layer is fully developed with recipes, reference implementations (real road routing via OSM, great-circle for air, address resolution), and worked examples. SDP, agent, and app layers can be generated using the coherence engine and LLM general knowledge, but don't have curated patterns yet.
+
 ## How It Works
 
 This repo is both the tool and the output. Clone it, talk to your AI coding agent, and the repo becomes your business.

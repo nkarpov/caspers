@@ -23,9 +23,9 @@ Usage:
         catalog="my_catalog",
         schema="simulator",
         volume="events",
-        start_day=70,
+        start_day=30,
         speed_multiplier=60.0,
-        dataset_days=90,
+        dataset_days=40,
         dataset_epoch_date=(2024, 1, 1),  # year, month, day the dataset starts
         entity_id_column="order_id",       # column to suffix on loops for uniqueness
     )
@@ -43,9 +43,9 @@ def replay(
     catalog: str,
     schema: str,
     volume: str,
-    start_day: int = 70,
+    start_day: int = 30,
     speed_multiplier: float = 60.0,
-    dataset_days: int = 90,
+    dataset_days: int = 40,
     dataset_epoch_date: Tuple[int, int, int] = (2024, 1, 1),
     entity_id_column: Optional[str] = None,
 ):

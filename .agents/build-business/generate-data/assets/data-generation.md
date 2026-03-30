@@ -76,7 +76,7 @@ The event stream is the heartbeat of the demo. Events flow through time, referen
 
 **Why not generate events live?** Live generation is fragile (job crashes = data stops), slow to backfill, and hard to reproduce. Instead:
 
-1. **Offline generation**: Pre-generate a canonical dataset covering N days (e.g., 90 days)
+1. **Offline generation**: Pre-generate a canonical dataset covering N days (e.g., 40 days)
 2. **Replay engine**: A scheduled job replays events at configurable speed with checkpoint-based resumption
 
 This gives you: instant historical backfill, reproducible data, configurable speed, and crash resilience.
@@ -191,6 +191,142 @@ started_to_finished: {median: 10, cv: 0.3}
 ready_to_pickup: {median: 6, cv: 0.33}
 ```
 
+### Spatial Tracking & Routing
+
+Many businesses involve entities that move through physical space. The skill supports generating realistic GPS tracking events with real road routes or great-circle (air) paths.
+
+**Code:** `assets/routing.py` — reference implementation for routing, geocoding, and derived field profiles. Inline into generated code, don't import.
+
+#### The Routing Primitive
+
+Given an ordered list of waypoints (lat/lon pairs), produce a route and tracking events along it. That's it. Everything else — where the waypoints come from, whether there's a radius constraint, what extra fields to track — is business-level.
+
+Two modes:
+- **`road`**: Real road routes via OSM graph + Dijkstra. Downloads the road network once per service area (~30-60s), then all routes are local and fast (milliseconds each). Dependencies: `osmnx`, `networkx` (`%pip install osmnx networkx`).
+- **`air`**: Great-circle interpolation. Suitable for flights, drones, anything not on roads. Zero dependencies.
+
+Multi-stop is native — chain shortest paths between consecutive waypoints on the same graph.
+
+Fallback for `road` when osmnx isn't available: OSRM public API (one HTTP call per route, slower but zero install).
+
+#### Address Resolution
+
+| Service | What it does | When to use |
+|---|---|---|
+| **Nominatim forward geocode** | Address string → (lat, lon) | Seed data has addresses, needs coords |
+| **Nominatim reverse geocode** | (lat, lon) → address string | Generated coords need a display address |
+| **RoadGraph.random_node()** | Random point on a real road | Best way to generate locations — guaranteed routable, no snapping needed |
+
+Rate limits: Nominatim is 1 req/sec, fine for seed data (tens/hundreds of rows). The graph-based approach has no rate limits — it's all local after the initial download.
+
+For road-based businesses, prefer `RoadGraph.random_node()` over random-point-in-radius + OSRM snap. It's faster and guaranteed to be on a real road.
+
+#### Location Modes on Entities
+
+Entities that have geographic positions declare how their coordinates are determined:
+
+```yaml
+entities:
+  kitchens:
+    fields: {kitchen_id: string, name: string, lat: double, lon: double, address: string}
+    location_mode: fixed              # coordinates provided in seed data
+
+  customers:
+    fields: {customer_id: string, lat: double, lon: double, address: string}
+    location_mode: generated_in_area
+    location_area:
+      center: ref(kitchens.lat, kitchens.lon)
+      radius_km: 6.4
+      reverse_geocode: true          # Nominatim → address string
+      # Uses RoadGraph.random_node() when road routing — no snap needed
+```
+
+- **`fixed`**: Coordinates are part of the seed data (airports, warehouses, offices)
+- **`generated_in_area`**: Random point within radius, optionally snapped to road and reverse-geocoded
+
+#### Tracking Events in the Blueprint
+
+```yaml
+tracking_events:
+  - name: driver_ping
+    during: [driver_picked_up->delivered]
+    interval_seconds: 60
+    route:
+      mode: road                     # road | air
+      waypoints:
+        - ref(events.order_created.body.kitchen_lat, kitchen_lon)
+        - ref(events.order_created.body.customer_lat, customer_lon)
+    body:
+      progress_pct: float
+      loc_lat: float                 # from route
+      loc_lon: float                 # from route
+
+  - name: flight_position
+    during: [departed->landed]
+    interval_seconds: 30
+    route:
+      mode: air
+      waypoints:
+        - ref(airports.origin.lat, lon)
+        - ref(airports.destination.lat, lon)
+    body:
+      progress_pct: float
+      lat: float                     # from route
+      lon: float                     # from route
+      altitude_ft:
+        profile: climb_cruise_descend
+        max: 35000
+      speed_knots:
+        profile: constant
+        value: 450
+        jitter: 20
+      heading: float                 # derived from route direction
+```
+
+#### Derived Field Profiles
+
+Some tracking body fields are computed from progress using built-in profiles:
+
+| Profile | Use case | Behavior |
+|---|---|---|
+| `climb_cruise_descend` | Aircraft altitude, train speed between stations | 0→max over climb phase, holds at max, max→0 over descent |
+| `constant` | Cruise speed, steady sensor readings | Fixed value with optional jitter |
+| `linear_ramp` | Fuel consumption, battery drain | Linear interpolation from start to end value |
+
+Custom profiles can be defined as Python functions in the body generators.
+
+#### How It Fits in the Canonical Generator
+
+1. **Context factory** computes the route once per entity lifecycle:
+   - Road mode: calls `osrm_route(waypoints)` → caches result
+   - Air mode: calls `great_circle_route(waypoints)`
+   - Stores `route_points` in context for tracking events to reference
+
+2. **Body generators** for tracking events use the route:
+   ```python
+   "driver_ping": lambda ctx, seed, rng, progress=0: {
+       "ping_lat": route_position_at(ctx["route_points"], progress)[0],
+       "ping_lon": route_position_at(ctx["route_points"], progress)[1],
+       "ping_progress": progress * 100,
+   }
+   ```
+
+3. **Derived fields** use profile functions:
+   ```python
+   "flight_position": lambda ctx, seed, rng, progress=0: {
+       "ping_lat": route_position_at(ctx["route_points"], progress)[0],
+       "ping_lon": route_position_at(ctx["route_points"], progress)[1],
+       "ping_altitude_ft": climb_cruise_descend(progress, max_value=35000),
+       "ping_speed_knots": constant_with_jitter(450, 20, rng),
+       "ping_heading": route_heading_at(ctx["route_points"], progress),
+   }
+   ```
+
+#### Worked Examples
+
+- **Ghost kitchen (road):** `assets/example_ghost_kitchen_transform.py` — OSRM routing, driver pings, customer location generation
+- **Airline (air):** `assets/example_airline_tracking.py` — great-circle routing, altitude/speed profiles, flight position tracking
+
 ---
 
 ## 3. Replay Engine
@@ -199,12 +335,43 @@ The replay engine is **business-agnostic** reusable code. It handles checkpointi
 
 **Code:** `assets/replay_engine.py` — ready to use, takes a `transform_fn` parameter.
 
+### Timeline Strategy: Instant History + Live Stream
+
+The key insight: **generate more data than you need, then start the cursor partway through.** This gives you instant historical data on first run, then live streaming going forward.
+
+```
+Dataset: 40 days of events (day 0 → day 39)
+Start day: 30
+
+First run (instant):
+  Day 0 ────────────────── Day 30 ── Day 30 + current time
+  │        HISTORICAL        │  ← all emitted instantly (no speed multiplier)
+  │     (~1 month of data)   │
+
+Subsequent runs (streaming):
+  Day 30 + current time ──────→ advancing at speed_multiplier × realtime
+  │  NEW EVENTS (live)       │
+```
+
+**Why this matters:**
+- Pipelines have data to process immediately (no waiting hours for volume)
+- Dashboards show trends and history from day 1
+- Agents have historical context for decisions
+- The demo looks "lived in" from the first minute
+
+**How to size it:**
+- `dataset_days`: How many total days to generate. 14 is minimal, 40 is comfortable.
+- `start_day`: Where to place the cursor. `dataset_days - 10` gives ~10 days of runway before looping.
+- `speed_multiplier`: How fast new events flow after backfill. 60 = 1 real minute covers 1 sim hour.
+
+These should be recorded in the Blueprint and passed to the replay job.
+
 ### How It Works
 
 **Inputs:**
 - Canonical dataset parquet with a `ts_seconds` column (the replay key)
 - A `transform_fn`: `(DataFrame, time_shift: int) -> DataFrame`
-- Config: catalog, schema, volume, start_day, speed_multiplier
+- Config: catalog, schema, volume, start_day, speed_multiplier, dataset_days
 - Optional: `entity_id_column` for loop-suffixing (e.g., `"order_id"`)
 
 **State (checkpoint files in volume):**
@@ -212,7 +379,7 @@ The replay engine is **business-agnostic** reusable code. It handles checkpointi
 - `_sim_start`: wall-clock time when simulation began (ISO timestamp)
 
 **Logic:**
-1. **First run**: backfill from day 0 → start_day + current time of day
+1. **First run**: backfill from day 0 → start_day + current time of day (all at once, fast)
 2. **Subsequent runs**: advance by `elapsed_real_time × speed_multiplier`
 3. **Looping**: wrap at dataset end, keep virtual timestamps monotonic, suffix entity IDs
 4. **Time-shift**: project events so they appear relative to "today"
@@ -265,3 +432,8 @@ After data generation, validate:
 - [ ] Demand volume looks realistic (not too uniform, not too sparse)
 - [ ] Seed data fields needed by downstream layers (pipeline, agent, app) are present
 - [ ] If documents exist: metadata JSON matches actual file contents
+- [ ] Entities with `location_mode: fixed` have lat/lon populated in seed data
+- [ ] Entities with `location_mode: generated_in_area` have a valid center reference and radius
+- [ ] Tracking events with `route` config have waypoint refs that resolve to valid coordinates
+- [ ] Route mode matches the business domain (road for ground, air for flights)
+- [ ] Derived field profiles produce realistic values (altitude > 0 during flight, etc.)

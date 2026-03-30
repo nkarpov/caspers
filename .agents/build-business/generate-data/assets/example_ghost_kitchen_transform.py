@@ -14,7 +14,7 @@ Usage:
         catalog="caspers",
         schema="simulator",
         volume="events",
-        start_day=70,
+        start_day=30,
         speed_multiplier=60.0,
         entity_id_column="order_id",
     )
