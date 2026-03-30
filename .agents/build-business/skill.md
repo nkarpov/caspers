@@ -60,7 +60,13 @@ Before generating any code, set up the catalog:
    ```
    Then create the `data` schema the same way: `CREATE SCHEMA {catalog}.data`
 5. **Find the warehouse ID** with `databricks warehouses list --profile {profile}` and record it in the Blueprint.
-6. **Confirm with the user** before proceeding.
+6. **Present the timeline defaults and ask the user to confirm or adjust:**
+
+> I'll generate **40 days** of historical data, with the replay starting at **day 30**. This gives you ~1 month of historical data available immediately on first run, with 10 days of runway before the dataset loops. New events stream at **60x speed** (1 real minute = 1 sim hour).
+>
+> Want to adjust any of these? (More/fewer days, different start point, faster/slower speed?)
+
+7. **Confirm everything with the user** before proceeding.
 
 All data goes in a schema called `data` within the chosen catalog:
 ```
@@ -71,7 +77,7 @@ All data goes in a schema called `data` within the chosen catalog:
 /Volumes/{catalog}/data/misc/
 ```
 
-Record the catalog name and profile in the Blueprint.
+Record the catalog name, profile, and timeline settings in the Blueprint.
 
 ### Phase 3: Generate Data
 Generate ONLY the data layer. Then deploy it.
@@ -128,6 +134,12 @@ status: elaborating  # seed | elaborating | generating | generated | deployed
 catalog: cascade_creek_brewing
 profile: CASPERSV2
 
+timeline:
+  dataset_days: 40          # how many days of events to pre-generate
+  start_day: 30             # replay cursor starts here (days 0-69 = instant history)
+  speed_multiplier: 60.0    # 1 real minute = 1 sim hour after backfill
+  replay_schedule: "*/5 * * * *"  # cron for replay job (every 5 min)
+
 entities:
   <name>:
     fields: {field: type, ...}
@@ -135,6 +147,12 @@ entities:
     foreign_keys:
       - {field: <field>, references: <entity>.<field>}
     count: <approximate rows in seed data>
+    location_mode: fixed | generated_in_area | null  # if entity has coordinates
+    location_area:                                    # only if generated_in_area
+      center: ref(<entity>.<lat_field>, <lon_field>)
+      radius_km: <number>
+      snap_to_road: true | false
+      reverse_geocode: true | false
     status: defined | generated
 
 events:
@@ -148,7 +166,17 @@ events:
     tracking_events:
       - name: <name>
         during: [<from>-><to>, ...]
-        body: {field: type, ...}
+        interval_seconds: <number>
+        route:                              # optional — only for spatial tracking
+          mode: road | air
+          waypoints:
+            - ref(<source of lat, lon>)
+            - ref(<source of lat, lon>)
+        body:
+          <field>: <type>
+          <field>:                           # derived field with profile
+            profile: climb_cruise_descend | constant | linear_ramp
+            <profile_params>
   status: defined | generated
 
 pipeline: null   # SDP — not yet defined
@@ -173,22 +201,32 @@ Run these after every Blueprint update AND after generating code.
    - Never use `get_json_field` — it does not exist in Spark SQL
    - Never reference columns like `entity_id` unless the generator actually produces them — check the Blueprint
 
+### Spatial Rules
+8. **Location Coordinates**: Entities with `location_mode: fixed` must have lat/lon fields in seed data
+9. **Generated Locations**: Entities with `location_mode: generated_in_area` must have a valid center reference that resolves to an entity with coordinates
+10. **Route Waypoints**: Every waypoint ref in tracking event `route.waypoints` must resolve to valid coordinates
+11. **Route Mode**: `road` for ground movement, `air` for flight — flag mismatches (e.g., road mode between airports 1000km apart)
+
 ### Soft Warnings (inform user)
-8. **Dangling Entities**: Entity defined but not referenced by any event
-9. **Unconsumed Tables**: Pipeline output not used by agent or app
-10. **Missing Layers**: Events defined but no pipeline; pipeline defined but no agent
-11. **Incomplete States**: Event state with no transitions and not marked terminal
+12. **Dangling Entities**: Entity defined but not referenced by any event
+13. **Unconsumed Tables**: Pipeline output not used by agent or app
+14. **Missing Layers**: Events defined but no pipeline; pipeline defined but no agent
+15. **Incomplete States**: Event state with no transitions and not marked terminal
 
 ## Sub-Skills
 
-Each layer has its own skill that can operate standalone or be orchestrated by `build-business`:
+Each layer has its own skill with reference implementations, recipes, and worked examples.
 
-| Skill | Purpose | Standalone use case |
+**The data layer is fully developed.** SDP, agent, and app layers can still be generated — the coherence engine guides the process and the LLM draws on its general knowledge — but they don't yet have curated patterns or reference code to draw on.
+
+| Skill | Purpose | Maturity |
 |---|---|---|
-| `generate-data` | Seed data, event streams, documents | "Add a new dataset to my existing business" |
-| *(more to come)* | SDP, agent, app | |
+| `generate-data` | Seed data, event streams, GPS routing, documents | **Full** — recipes, reference code, worked examples |
+| *(generate-sdp)* | Spark Declarative Pipeline (bronze/silver/gold) | Planned — LLM generates from Blueprint, no reference patterns yet |
+| *(generate-agent)* | AI agent with UC function tools | Planned — LLM generates from Blueprint, no reference patterns yet |
+| *(generate-app)* | UI + database app | Planned — LLM generates from Blueprint, no reference patterns yet |
 
-When generating a layer, delegate to the appropriate sub-skill with the current Blueprint. The sub-skill generates artifacts; you validate coherence across layers.
+When generating a layer, delegate to the appropriate sub-skill with the current Blueprint. The sub-skill generates artifacts; you validate coherence across layers. For layers without a sub-skill yet, generate directly using the Blueprint and coherence rules.
 
 ## Recipes
 
@@ -203,9 +241,14 @@ Never force a recipe. If the user wants something custom, help them build it and
 
 Everything is **DABs-native**. No stage notebooks for infrastructure orchestration. No imperative SDK calls to create resources. No state manager for cleanup.
 
-- `databricks.yml` declares all infrastructure (pipelines, jobs, endpoints, apps, schemas, volumes)
+- `databricks.yml` declares all infrastructure (pipelines, jobs, endpoints, apps, volumes)
 - Code files define behavior (transforms, agent logic, app code, data generation)
-- `databricks bundle deploy` creates everything. `databricks bundle destroy` tears it down.
+- `databricks bundle deploy` creates volumes and jobs. `databricks bundle destroy` tears those down.
+- **Cleanup is two steps:**
+  1. `databricks bundle destroy` — removes jobs, volumes, and workspace files
+  2. `DROP CATALOG {catalog} CASCADE` via SQL — removes the catalog, schema, tables, and all data
+
+  Always remind the user of both steps when they ask to clean up.
 
 Generated files:
 | File | Purpose |
@@ -237,6 +280,8 @@ The catalog IS the business. All data lives in a `data` schema within it:
 
 In `databricks.yml`, do NOT set a default catalog to `main` or any generic name. The catalog variable should default to the business-specific catalog name from the Blueprint.
 
+**Do NOT declare schemas in `databricks.yml`.** The catalog and schema are created via SQL during Phase 2.5. If `databricks.yml` also declares the schema as a resource, DABs will error with "Schema already exists" on deploy. Only declare volumes and jobs in `databricks.yml` — schemas are SQL-managed.
+
 ### Seed Data as Managed Delta Tables
 
 Seed data must be written as **managed Delta tables** (not parquet files in volumes). Use `spark.createDataFrame(df).write.saveAsTable()`. This enables:
@@ -264,6 +309,22 @@ All generated code must run on Databricks serverless. Follow these rules:
 4. **No `if __name__ == "__main__":` guard** — serverless doesn't invoke scripts as `__main__`. Call `main()` directly at module level.
 5. **Serverless jobs need `environments` block** — every job must declare an environment and every task must reference `environment_key`.
 
+### DABs Target Configuration
+
+**CRITICAL:** Always use `mode: production` on the default target. Without this, DABs prefixes resource names with `dev_{username}_`, which creates schemas like `dev_nick_karpov_data` instead of `data` — breaking volume paths and causing mismatches between SQL-created schemas and DABs-created volumes.
+
+```yaml
+targets:
+  default:
+    mode: production
+    default: true
+    workspace:
+      host: <workspace_url>
+      root_path: /Workspace/Users/<user_email>/.bundle/${bundle.name}/${bundle.target}
+```
+
+**`root_path` is required** when using `mode: production`. Use the current user's email (from `databricks auth profiles` or the Blueprint). Without it, DABs will error at deploy time.
+
 ### Serverless Job Template
 
 Every job in `databricks.yml` should follow this pattern:
@@ -275,7 +336,7 @@ jobs:
     environments:
       - environment_key: default
         spec:
-          client: "1"
+          environment_version: "5"
     tasks:
       - task_key: my_task
         environment_key: default
@@ -297,6 +358,9 @@ jobs:
 - Use `__file__`, `Path(__file__)`, or `if __name__ == "__main__":` in Databricks code
 - Write seed data to volumes as parquet (use managed Delta tables with PK/FK)
 - Forget volume declarations in `databricks.yml` for paths used in code
+- Use a `dev` target without `mode: production` — DABs will prefix resource names and break volume paths
+- Declare schemas in `databricks.yml` — they're created via SQL; declaring them in DABs causes "already exists" errors
+- Omit `root_path` from a `mode: production` target — DABs will reject the deploy
 - Default the catalog to `main` — always use the business-specific catalog
 - Modify AGENTS.md — it is static
 - Reference columns in queries that don't exist in the generated schema
