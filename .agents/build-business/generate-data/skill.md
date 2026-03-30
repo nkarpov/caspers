@@ -91,6 +91,18 @@ Two files:
 
 The replay engine in `assets/replay_engine.py` is **reference material** for how the replay logic works. Generated code should inline it, not import from it.
 
+### Timeline Configuration
+
+The canonical generator and replay work together to create **instant historical data + live streaming**:
+
+- **`dataset_days`** (Blueprint → `timeline.dataset_days`): How many days to pre-generate. Default 40.
+- **`start_day`** (Blueprint → `timeline.start_day`): Where the replay cursor starts. Days before this = instant backfill on first run. Default `dataset_days - 10`.
+- **`speed_multiplier`** (Blueprint → `timeline.speed_multiplier`): How fast new events flow after backfill. 60 = 1 real minute covers 1 sim hour.
+
+The canonical generator accepts `--days=N`. The replay accepts `--start-day=N` and `--speed=X`.
+
+Read `assets/data-generation.md` section "Timeline Strategy" for the full explanation. **Always configure this in the Blueprint** — if the user doesn't specify, suggest `dataset_days: 40, start_day: 30, speed_multiplier: 60.0` as sensible defaults.
+
 ### Unstructured Documents
 - Files in `data/documents/` organized by type
 - Metadata JSON alongside each document set
@@ -99,7 +111,7 @@ The replay engine in `assets/replay_engine.py` is **reference material** for how
 ### Infrastructure
 - Volume declarations in `databricks.yml` for events, canonical, and misc
 - Job declarations for seed loader, canonical generator, and event replay (with schedule)
-- Schema declaration for `data` within the business catalog
+- Schema is created via SQL during catalog setup — do NOT declare it in `databricks.yml`
 
 ## Event Schema
 
@@ -139,6 +151,34 @@ When providing DBSQL queries for the user to test data:
 4. **Never reference columns like `entity_id` unless the generator actually produces that column.** The entity ID (batch_id, order_id, visit_id, etc.) is typically inside the body JSON, not a top-level column. Check what the replay transform actually outputs as top-level columns.
 5. **Validate every query against the Blueprint before presenting it.** For each column reference, trace it to either a top-level output column or a body field in the Blueprint.
 
+## Spatial Tracking
+
+When the Blueprint includes tracking events with a `route` config, generate spatial tracking code.
+
+Read `assets/data-generation.md` for the full spatial section and `assets/routing.py` for the reference implementation.
+
+### What to generate
+
+1. **In the canonical generator**: inline routing functions from `assets/routing.py` (don't import — inline the functions you need). The context factory should compute routes, and tracking body generators should use `route_position_at()`.
+
+2. **In the replay transform**: tracking events already have `ping_lat`, `ping_lon`, etc. as compact parquet columns. The transform just assembles them into the body JSON (same as non-spatial events).
+
+3. **For `generated_in_area` entities**: the canonical generator creates random locations (with optional road snap + reverse geocode) during context setup.
+
+### Route mode selection
+
+- Use `road` (OSRM) for ground vehicles: delivery, ride share, fleet, ambulance
+- Use `air` (great-circle) for aircraft, drones, ships (roughly), satellites
+- Multi-stop: just more waypoints in the list — both modes handle it
+
+### Dependencies
+
+Road routing: `osmnx`, `networkx` — install via `%pip install osmnx networkx` at the top of the canonical generator. The graph is loaded once, then all routes are local Dijkstra (milliseconds each).
+
+Air routing: no dependencies (pure math).
+
+Address resolution: `requests` for Nominatim geocoding. For road businesses, prefer `RoadGraph.random_node()` over Nominatim — it's faster and guaranteed routable.
+
 ## Coherence Rules
 
 You must validate after generation:
@@ -148,6 +188,10 @@ You must validate after generation:
 - Every `/Volumes/...` path in code has a matching volume in `databricks.yml`
 - All PK/FK constraints in seed generator match the entity relationships in the Blueprint
 - If documents exist: metadata matches file contents
+- Entities with `location_mode: fixed` have lat/lon in seed data
+- Entities with `location_mode: generated_in_area` have a valid center ref and radius
+- Tracking event waypoint refs resolve to real coordinates
+- Route mode matches the domain (road for ground, air for flight)
 
 ## What You Never Do
 
@@ -160,3 +204,6 @@ You must validate after generation:
 - Default the catalog to `main`
 - Use `get_json_field` in SQL queries
 - Reference non-existent columns in sample queries
+- Use OSRM API as primary routing — use `RoadGraph` (osmnx + Dijkstra) instead
+- Compute routes per-entity instead of loading the graph once at startup
+- Generate tracking events without a route when the Blueprint specifies spatial tracking

@@ -25,16 +25,18 @@ The repo starts as a skeleton and becomes your business.
 
 ## What Gets Generated
 
-| File | Purpose |
-|---|---|
-| `BLUEPRINT.md` | Living business blueprint — tracks all decisions |
-| `databricks.yml` | DABs infrastructure declaration |
-| `data/seed_generator.py` | Managed Delta tables with PK/FK constraints |
-| `data/canonical_generator.py` | State machine event dataset |
-| `data/replay.py` | Streaming replay engine |
-| `pipelines/transforms.py` | SDP bronze → silver → gold |
-| `agents/agent.py` | MLflow agent definition |
-| `apps/app/` | FastAPI + frontend |
+| File | Purpose | Maturity |
+|---|---|---|
+| `BLUEPRINT.md` | Living business blueprint — tracks all decisions | Core |
+| `databricks.yml` | DABs infrastructure declaration | Core |
+| `data/seed_generator.py` | Managed Delta tables with PK/FK constraints | Full |
+| `data/canonical_generator.py` | State machine event dataset with GPS routing | Full |
+| `data/replay.py` | Streaming replay engine | Full |
+| `pipelines/transforms.py` | SDP bronze → silver → gold | Planned |
+| `agents/agent.py` | MLflow agent definition | Planned |
+| `apps/app/` | FastAPI + frontend | Planned |
+
+**Full** = curated patterns, reference code, worked examples. **Planned** = the skill generates these using the blueprint and LLM general knowledge, but no specialized recipes yet.
 
 ## Architecture
 

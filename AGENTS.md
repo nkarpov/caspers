@@ -2,6 +2,8 @@
 
 Caspers is a skill that builds fully deployable Databricks business demos from natural language. Describe a business — airline, bank, hospital, ghost kitchen — and Caspers generates coherent streaming data, Spark Declarative Pipelines, AI agents, and apps.
 
+**Current state:** The data generation layer is fully developed with recipes, reference implementations (real road routing via OSM, great-circle for air, address resolution), and worked examples. SDP, agent, and app layers can be generated using the coherence engine and LLM general knowledge, but don't have curated patterns yet.
+
 ## How It Works
 
 This repo is both the tool and the output. Clone it, talk to your AI coding agent, and the repo becomes your business.
@@ -52,12 +54,14 @@ The skill enforces these invariants:
 
 Everything is DABs-native. No stage notebooks, no imperative infrastructure orchestration, no state tracking for cleanup.
 
-```
-databricks bundle deploy   → creates everything
-databricks bundle destroy  → tears it down
-```
+- Catalog and schema are created via SQL during setup (not in `databricks.yml`)
+- `databricks.yml` declares volumes and jobs only
+- Cleanup is two steps:
 
-`databricks.yml` declares all infrastructure (pipelines, jobs, endpoints, apps, schemas, volumes). Code files define what each component does. That's it.
+```
+databricks bundle destroy              → removes jobs, volumes, workspace files
+DROP CATALOG {name} CASCADE via SQL    → removes catalog, schema, tables, data
+```
 
 ## Project Structure
 

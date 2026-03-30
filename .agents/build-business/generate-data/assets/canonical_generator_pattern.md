@@ -27,7 +27,7 @@ def generate_canonical(
     demand,            # DemandConfig object
     body_generators,   # dict: {"event_type_name": fn(context, seed_data) -> dict}
     context_factory,   # fn(seed_data) -> context dict for one entity lifecycle
-    days=90,
+    days=40,
     epoch=datetime(2024, 1, 1),
     random_seed=42,
 ):
@@ -126,6 +126,91 @@ def sample_delay(delay_config, rng):
     else:
         raise ValueError(f"Unknown distribution: {dist}")
 ```
+
+## Spatial Routing in the Generator
+
+When tracking events have a `route` config, the context factory computes the route once per entity lifecycle, and tracking body generators index into it.
+
+### Route Computation in Context Factory
+
+```python
+from routing import RoadGraph, great_circle_route
+
+# Load graph ONCE at generator startup (not per-entity)
+# For multiple service areas, load one graph per area
+road_graph = RoadGraph.load(center=(37.77, -122.42), radius_km=6.4, network_type="drive")
+
+def context_factory_with_routing(seed_data, rng, route_config):
+    """Extended context factory that computes routes for spatial tracking."""
+    # ... pick seed data as usual ...
+
+    # Generate destination if needed
+    if destination_mode == "generated_in_area":
+        # For road businesses, use the graph's random_node — guaranteed routable
+        dest = road_graph.generate_location_in_area(rng, with_address=True)
+        dest_lat, dest_lon = dest["lat"], dest["lon"]
+        dest_address = dest["address"]
+
+    # Compute route based on mode
+    waypoints = [(origin_lat, origin_lon), (dest_lat, dest_lon)]
+    # Multi-stop: just add more waypoints to the list
+
+    if route_config["mode"] == "road":
+        route_points, distance_m = road_graph.route_multi(waypoints)
+    elif route_config["mode"] == "air":
+        route_points = great_circle_route(waypoints, points_per_segment=100)
+        distance_m = None  # use great_circle_distance_km if needed
+
+    context["route_points"] = route_points
+    context["route_json"] = [[p[0], p[1]] for p in route_points]
+    # ... return context ...
+```
+
+Route results are cached automatically by `osrm_route` — identical waypoint pairs return the cached route without another API call.
+
+### Tracking Body Generators with Routes
+
+```python
+from routing import route_position_at, route_heading_at, climb_cruise_descend, constant_with_jitter
+
+# Road-based (ghost kitchen)
+"driver_ping": lambda ctx, seed, rng, progress=0: {
+    "ping_lat": route_position_at(ctx["route_points"], progress)[0],
+    "ping_lon": route_position_at(ctx["route_points"], progress)[1],
+    "ping_progress": progress * 100,
+},
+
+# Air-based (airline) with derived field profiles
+"flight_position": lambda ctx, seed, rng, progress=0: {
+    "ping_lat": route_position_at(ctx["route_points"], progress)[0],
+    "ping_lon": route_position_at(ctx["route_points"], progress)[1],
+    "ping_progress": progress * 100,
+    "ping_altitude_ft": climb_cruise_descend(progress, max_value=35000),
+    "ping_speed_knots": constant_with_jitter(450, 20, rng),
+    "ping_heading": route_heading_at(ctx["route_points"], progress),
+},
+```
+
+### Graph Loading Strategy
+
+Load ONE graph per service area at generator startup. The graph stays in memory for the entire run.
+
+```python
+# Multiple service areas = multiple graphs
+graphs = {}
+for loc in seed_data["locations"].itertuples():
+    graphs[loc.location_id] = RoadGraph.load(
+        center=(loc.lat, loc.lon),
+        radius_km=6.4,
+        network_type="drive",  # or "walk" for pedestrian businesses
+    )
+```
+
+Route caching is built into `RoadGraph` — same origin→destination pair returns the cached result. For businesses with fixed origins, there are only `N_origins × N_destinations` unique routes.
+
+For air routes, no graph needed — `great_circle_route` is pure math.
+
+---
 
 ## The Business-Specific Parts
 
